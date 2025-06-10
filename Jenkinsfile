@@ -24,7 +24,10 @@ pipeline {
             steps {
                 script {
                     echo "Checking out SCM..."
-                    checkout scm // Checkout the source code once
+
+                    def repoUrl = 'https://github.com/nilknow/temp.git'
+                    sh "mkdir source/"
+                    sh "git clone ${repoUrl}"
 
                     // Ensure the target directory for test results exists on the agent
                     sh "mkdir -p target/test-results"
@@ -44,75 +47,61 @@ pipeline {
                     def parallelStages = [:]
                     def testCommands = []
 
-                    // Define what each parallel instance will do.
-                    // For demonstration, let's just run the same script for each parallel instance.
-                    // In a real scenario, you'd vary 'TEST_SCRIPT' or pass specific arguments.
-                    for (int i = 0; i < PARALLEL_COUNT; i++) {
-                        // You could pass unique arguments to each instance if needed
-                        // For example: `TEST_SCRIPT + " --test-group=${i}"`
+                    def parallelCountInt = PARALLEL_COUNT.toInteger()
+
+                    for (int i = 0; i < parallelCountInt; i++) {
                         testCommands.add(env.TEST_SCRIPT)
                     }
+
+                    echo "start parallel stages, ${PARALLEL_COUNT}, ${WINDOWS_VERSION}, ${TEST_SCRIPT}"
 
                     testCommands.eachWithIndex { cmd, i ->
                         def stageName = "Windows Test Instance ${i + 1}"
                         def containerName = "windows-test-${env.BUILD_NUMBER}-${i}"
                         def agentReportDir = "${pwd()}/target/test-results/instance-${i}" // Unique dir on agent
 
+                        echo "run ${stageName} in container ${containerName}"
+
                         parallelStages[stageName] = {
-                            // Agent directive for the Docker container
-                            agent {
-                                docker {
-                                    image "${DOCKUR_IMAGE}"
-                                    // todo fix the -v
-                                    args "-e VERSION=${WINDOWS_VERSION} -e DISK_SIZE=32G --name ${containerName} -v \"${pwd()}:${PROJECT_DIR_IN_CONTAINER}\" -v \"${agentReportDir}:${REPORT_DIR_IN_CONTAINER}\""
-                                }
-                            }
-                            steps {
-                                script {
-                                    // Create a directory for this instance's results on the Jenkins agent
-                                    sh "mkdir -p ${agentReportDir}"
+                            // No 'steps' block here, as we are already inside a Groovy closure for dynamic parallelism
+                            script { // This `script` block is necessary to run Groovy logic
+                                // Create a directory for this instance's results on the Jenkins agent
+                                sh "mkdir -p ${agentReportDir}"
 
-                                    echo "Running tests in ${stageName} container '${containerName}'..."
-                                    try {
-                                        // Unstash the source code into the mounted volume
-                                        // The 'unstash' command works within the Docker context, writing to the mounted volume
-                                        unstash 'project-source'
+                                echo "Starting ${DOCKUR_IMAGE}:${WINDOWS_VERSION} container named ${containerName}..."
+                                sh """
+                                    docker run -d \\
+                                        -e VERSION=${WINDOWS_VERSION} \\
+                                        -e DISK_SIZE=32G \\
+                                        --name ${containerName} \\
+                                        -v "${pwd()}:${PROJECT_DIR_IN_CONTAINER}" \\
+                                        -v "${agentReportDir}:${REPORT_DIR_IN_CONTAINER}" \\
+                                        ${DOCKUR_IMAGE}
+                                """
+                                sh "sleep 120" // Give Windows VM time to boot
 
-                                        sh """
-                                            echo "Starting ${DOCKUR_IMAGE}:${WINDOWS_VERSION} container named ${containerName}..."
-                                            docker run -d \\
-                                                -e VERSION=${WINDOWS_VERSION} \\
-                                                -e DISK_SIZE=32G \\
-                                                -e RDP_PORT=3389 \\
-                                                -p 3389 \\
-                                                --name ${containerName} \\
-                                                -v "${pwd()}:${PROJECT_DIR_IN_CONTAINER}" \\
-                                                -v "${agentReportDir}:${REPORT_DIR_IN_CONTAINER}" \\
-                                                ${DOCKUR_IMAGE}
-                                        """
-                                        sh "sleep 120" // Give Windows VM time to boot and for network to initialize
+                                echo "Executing tests in ${containerName}..."
+                                try {
+                                    unstash 'project-source'
 
-                                        echo "Executing tests in ${containerName}..."
-                                        // todo run in VNC session
-                                        sh """
-                                            docker exec ${containerName} ${TEST_SCRIPT}
-                                        """
+                                    sh """
+                                        docker exec ${containerName} ${TEST_SCRIPT}
+                                    """
 
-                                    } catch (Exception e) {
-                                        echo "Tests in ${stageName} failed: ${e.getMessage()}"
-                                        currentBuild.result = 'UNSTABLE' // Mark as unstable if tests fail in one instance
-                                        throw e // Re-throw to fail the parallel branch
-                                    } finally {
-                                        echo "Stopping and removing ${containerName}..."
-                                        // Ensure the container is stopped and removed
-                                        sh "docker stop ${containerName} || true" // '|| true' prevents pipeline failure if stop fails
-                                        sh "docker rm ${containerName} || true"
+                                } catch (Exception e) {
+                                    echo "Tests in ${stageName} failed: ${e.getMessage()}"
+                                    currentBuild.result = 'UNSTABLE'
+                                    throw e // Re-throw to fail the parallel branch
+                                } finally {
+                                    echo "Stopping and removing ${containerName}..."
+                                    sh "docker stop ${containerName} || true"
+                                    sh "docker rm ${containerName} || true"
+
+                                    if (fileExists("${agentReportDir}/**/*.xml")) {
+                                        junit "${agentReportDir}/**/*.xml"
+                                    } else {
+                                        echo "Warning: No JUnit XML reports found in ${agentReportDir}"
                                     }
-                                }
-                            }
-                            post {
-                                always {
-                                    junit "${agentReportDir}/**/*.xml"
                                 }
                             }
                         }
