@@ -2,7 +2,7 @@ pipeline {
     agent any // Jenkins agent (must be a Windows machine with Docker Desktop, configured for Windows Containers)
 
     parameters {
-        intParam(name: 'PARALLEL_COUNT', defaultValue: 3, description: 'Number of parallel Windows containers to run tests in')
+        string(name: 'PARALLEL_COUNT', defaultValue: '3', description: 'Number of parallel Windows containers to run tests in')
         string(name: 'WINDOWS_VERSION', defaultValue: '2025', description: 'Windows version for dockur/windows (e.g., 10, 11, 2025)')
         string(name: 'TEST_SCRIPT', defaultValue: 'powershell.exe -File C:\\project\\run_tests.ps1', description: 'PowerShell command to execute tests inside the container')
     }
